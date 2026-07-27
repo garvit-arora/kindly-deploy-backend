@@ -21,8 +21,22 @@ model User{
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   sessions Session[]
+  installations GithubInstallation[]
 }
 
+model GithubInstallation{
+  id String @id@default(cuid())
+  installationId String @unique
+  accountId String
+  accountLogin String
+  accountType String
+  userId String
+  user User @relation(fields: [userId],references: [id],onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
 model Project{
   id String @id @default(cuid())
   name String 
