@@ -1,2 +1,4 @@
 node_modules/
-.envclear
+.env
+
+/src/generated/prisma
