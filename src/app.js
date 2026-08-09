@@ -2,6 +2,14 @@ const express = require('express');
 const cors = require('cors')
 const prisma = require('./lib/prisma');
 const crypto = require('crypto')
+const deploymentRoutes = require('./routes/deployments.route')
+const {
+  getGitHubInstallation,
+  getInstallationRepositories,
+  getInstallationBranches,
+} = require('./utils/githubApp')
+const redis = require('./lib/redis')
+const deploymentQueue = require('./queues/deploymentQueue')
 const {
     SESSION_DURATION_MS,
     getSessionExpiresAt,
@@ -22,6 +30,7 @@ app.use(express.json());
 app.use(cookieParser());
 
 app.use('/api/projects',projectRoutes)
+app.use('/api/deployments', deploymentRoutes)
 app.get('/api/health', async (req, res) => {
     try {
         await prisma.$queryRaw`SELECT 1`
@@ -39,6 +48,49 @@ app.get('/api/health', async (req, res) => {
     }
 })
 
+
+app.get('/api/redis-health', async (req, res) => {
+  try {
+    const reply = await redis.ping()
+
+    return res.status(200).json({
+      status: reply === 'PONG' ? 'ok' : 'error',
+      message: 'Redis is running.',
+    })
+  } catch (error) {
+    console.error('Redis health check failed:', error)
+
+    return res.status(503).json({
+      status: 'error',
+      message: 'Redis is unavailable.',
+    })
+  }
+})
+app.post('/api/queue-test', requireAuth, async (req, res) => {
+  try {
+    const job = await deploymentQueue.add(
+      'deployment-test',
+      {
+        deploymentId: 'test-deployment-id',
+      },
+      {
+        removeOnComplete: true,
+        removeOnFail: 100,
+      },
+    )
+
+    return res.status(201).json({
+      message: 'Test job added to the deployment queue.',
+      jobId: job.id,
+    })
+  } catch (error) {
+    console.error('Queue test failed:', error)
+
+    return res.status(500).json({
+      message: 'Could not add test job.',
+    })
+  }
+})
 app.post('/api/auth/dev-login', async (req, res) => {
     if (process.env.NODE_ENV == "production") {
         return res.sendStatus(404);
@@ -256,6 +308,121 @@ app.get('/api/github/install',requireAuth,(req,res)=>{
         })
     }
     return res.redirect(`https://github.com/apps/${GITHUB_APP_SLUG}/installations/new`)
+})
+
+app.get('/api/github/install/callback', requireAuth, async (req, res) => {
+  const installationId = req.query.installation_id
+
+  if (!installationId) {
+    return res.status(400).json({
+      message: 'GitHub did not provide an installation ID.',
+    })
+  }
+
+  try {
+    const installation = await getGitHubInstallation(installationId)
+
+    await prisma.githubInstallation.upsert({
+      where: {
+        installationId: String(installation.id),
+      },
+      update: {
+        accountId: String(installation.account.id),
+        accountLogin: installation.account.login,
+        accountType: installation.account.type,
+        userId: req.user.id,
+      },
+      create: {
+        installationId: String(installation.id),
+        accountId: String(installation.account.id),
+        accountLogin: installation.account.login,
+        accountType: installation.account.type,
+        userId: req.user.id,
+      },
+    })
+
+    return res.redirect(`${process.env.FRONTEND_URL}/dashboard/projects/new`)
+  } catch (error) {
+    console.error('GitHub installation callback failed:', error)
+
+    return res.status(500).json({
+      message: 'Could not save the GitHub installation.',
+    })
+  }
+})
+
+app.get('/api/github/repositories', requireAuth, async (req, res) => {
+  try {
+    const installations = await prisma.githubInstallation.findMany({
+      where: {
+        userId: req.user.id,
+      },
+    })
+
+    const repositoryGroups = await Promise.all(
+      installations.map(async (installation) => ({
+        installationId: installation.id,
+        repositories: await getInstallationRepositories(
+          installation.installationId,
+        ),
+      })),
+    )
+
+    const repositories = repositoryGroups.flatMap((group) =>
+      group.repositories.map((repository) => ({
+        ...repository,
+        installationId: group.installationId,
+      })),
+    )
+
+    return res.status(200).json({ repositories })
+  } catch (error) {
+    console.error('GitHub repository lookup failed:', error)
+
+    return res.status(500).json({
+      message: 'Could not load GitHub repositories.',
+    })
+  }
+})
+app.get('/api/github/branches', requireAuth, async (req, res) => {
+  const { installationId, repositoryFullName } = req.query
+
+  if (
+    typeof installationId !== 'string' ||
+    typeof repositoryFullName !== 'string'
+  ) {
+    return res.status(400).json({
+      message: 'Installation ID and repository name are required.',
+    })
+  }
+
+  try {
+    const installation = await prisma.githubInstallation.findFirst({
+      where: {
+        id: installationId,
+        userId: req.user.id,
+      },
+    })
+
+    if (!installation) {
+      return res.status(404).json({
+        message: 'GitHub installation was not found.',
+      })
+    }
+
+    const branches = await getInstallationBranches(
+      installation.installationId,
+      repositoryFullName,
+    )
+
+    return res.status(200).json({ branches })
+  } catch (error) {
+    console.error('GitHub branch lookup failed:', error)
+
+    return res.status(500).json({
+      message: 'Could not load GitHub branches.',
+    })
+  }
 })
 
 module.exports = app;

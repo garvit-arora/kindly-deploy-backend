@@ -11,50 +11,119 @@ datasource db {
   provider = "postgresql"
 }
 
-model User{
-  id String @id @default(cuid())
-  email String? @unique
-  githubId String? @unique
-  name String?
-  avatarUrl String?
-  projects Project[]
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  sessions Session[]
-  installations GithubInstallation[]
+model User {
+  id                   String               @id @default(cuid())
+  email                String?              @unique
+  githubId             String?              @unique
+  name                 String?
+  avatarUrl            String?
+  projects             Project[]
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+  sessions             Session[]
+  installations        GithubInstallation[]
+  deploymentActivities DeploymentActivity[]
 }
 
-model GithubInstallation{
-  id String @id@default(cuid())
-  installationId String @unique
-  accountId String
-  accountLogin String
-  accountType String
-  userId String
-  user User @relation(fields: [userId],references: [id],onDelete: Cascade)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+model Deployment {
+  id                   String               @id @default(cuid())
+  projectId            String
+  project              Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  branch               String
+  commitSha            String
+  dockerfilePath       String               @default("Dockerfile")
+  status               DeploymentStatus     @default(PENDING)
+  imageTag             String?
+  containerName        String?
+  startedAt            DateTime?
+  finishedAt           DateTime?
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+  activities           DeploymentActivity[]
+  hostPort             Int?
+  containerPort        Int?
+  localUrl             String?
+  previewScreenshotUrl String?
+  supersededAt         DateTime?
+  stoppedAt            DateTime?
+
+  @@index([projectId, createdAt])
+  @@index([status])
+}
+
+enum DeploymentActivityType {
+  DEPLOYMENT_CREATED
+  STATUS_CHANGED
+  BUILD_STARTED
+  BUILD_COMPLETED
+  BUILD_FAILED
+}
+
+model GithubInstallation {
+  id             String    @id @default(cuid())
+  installationId String    @unique
+  accountId      String
+  accountLogin   String
+  accountType    String
+  userId         String
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  projects       Project[]
 
   @@index([userId])
 }
-model Project{
-  id String @id @default(cuid())
-  name String 
-  repositoryUrl String?
-  branch String @default("main")
-  userId String
-  user User @relation(fields: [userId],references: [id],onDelete: Cascade)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
 
+enum DeploymentStatus {
+  PENDING
+  QUEUED
+  BUILDING
+  READY
+  FAILED
+  CANCELLED
+}
+
+model DeploymentActivity {
+  id           String                 @id @default(cuid())
+  deploymentId String
+  deployment   Deployment             @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+  actorUserId  String?
+  actorUser    User?                  @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+  type         DeploymentActivityType
+  fromStatus   DeploymentStatus?
+  toStatus     DeploymentStatus?
+  message      String
+  metadata     Json?
+  createdAt    DateTime               @default(now())
+
+  @@index([deploymentId, createdAt])
+  @@index([actorUserId])
+}
+
+model Project {
+  id                       String              @id @default(cuid())
+  name                     String
+  repositoryUrl            String?
+  branch                   String              @default("main")
+  userId                   String
+  user                     User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt                DateTime            @default(now())
+  updatedAt                DateTime            @updatedAt
+  githubInstallationId     String?
+  githubInstallation       GithubInstallation? @relation(fields: [githubInstallationId], references: [id], onDelete: SetNull)
+  githubRepositoryId       String?
+  githubRepositoryFullName String?
+  deployments              Deployment[]
+
+  @@index([githubInstallationId, githubRepositoryId])
   @@index([userId])
 }
 
-model Session{
-  id String @id @default(cuid())
-  tokenHash String @unique
-  userId String
-  user User @relation(fields: [userId],references: [id],onDelete: Cascade)
+model Session {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   expiresAt DateTime
   createdAt DateTime @default(now())
 

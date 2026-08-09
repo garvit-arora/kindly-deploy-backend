@@ -5,7 +5,8 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "worker": "node src/workers/deploymentWorker.js"
   },
   "keywords": [],
   "author": "",
@@ -14,12 +15,17 @@
   "dependencies": {
     "@prisma/adapter-pg": "^7.9.0",
     "@prisma/client": "^7.9.0",
+    "adm-zip": "^0.6.0",
+    "bullmq": "^6.0.5",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "imagekit": "^6.0.0",
+    "ioredis": "^6.0.0",
     "nodemon": "^3.1.14",
-    "pg": "^8.22.0"
+    "pg": "^8.22.0",
+    "playwright": "^1.62.0"
   },
   "devDependencies": {
     "prisma": "^7.9.0"
