@@ -13,13 +13,17 @@ const {
   runDockerContainer,
   inspectDockerContainer,
   getDockerHostPort,
+  followDockerContainerLogs,
 } = require('../utils/docker')
-
+const {
+  createDeploymentLogWriter,
+} = require('../utils/deploymentLogWriter')
 const connection = {
+  
   host: '127.0.0.1',
   port: 6379,
 }
-
+const runtimeLogFollowers = new Map()
 const worker = new Worker(
   'deployments',
   async (job) => {
@@ -105,13 +109,23 @@ const worker = new Worker(
         },
       })
 
-      await runDockerBuild({
-        repositoryPath,
-        imageTag,
-        onLog: (line) => {
-          process.stdout.write(`[${deploymentId}] ${line}`)
-        },
+      const buildLogWriter = createDeploymentLogWriter({
+        deploymentId,
+        source: 'BUILD',
       })
+
+      try {
+        await runDockerBuild({
+          repositoryPath,
+          imageTag,
+          onLog: (line) => {
+            process.stdout.write(`[${deploymentId}] ${line}`)
+            buildLogWriter.write(line)
+          },
+        })
+      } finally {
+        await buildLogWriter.close()
+      }
 
       const containerName = `kindlydeploy-${deployment.id}`
       const containerPort = 80
@@ -172,6 +186,19 @@ const worker = new Worker(
       })
 
       await prisma.$transaction(async (tx) => {
+        await tx.deployment.updateMany({
+          where: {
+            projectId: deployment.project.id,
+            id: {
+              not: deploymentId,
+            },
+            status: 'READY',
+            supersededAt: null,
+          },
+          data: {
+            supersededAt: new Date(),
+          },
+        })
         await tx.deployment.update({
           where: { id: deploymentId },
           data: {
@@ -202,6 +229,22 @@ const worker = new Worker(
           },
         })
       })
+      const runtimeLogWriter = createDeploymentLogWriter({
+  deploymentId,
+  source: 'RUNTIME',
+})
+
+const runtimeLogProcess = followDockerContainerLogs({
+  containerName,
+  onLog: (line) => {
+    runtimeLogWriter.write(line)
+  },
+})
+
+runtimeLogFollowers.set(deploymentId, {
+  process: runtimeLogProcess,
+  writer: runtimeLogWriter,
+})
       try {
         const screenshotPath = await takeScreenshot(localUrl, deploymentId)
 
@@ -276,7 +319,6 @@ const worker = new Worker(
   },
   { connection },
 )
-
 worker.on('completed', (job) => {
   console.log(`Job ${job.id} completed`)
 })
@@ -286,9 +328,14 @@ worker.on('failed', (job, error) => {
 })
 
 console.log('Deployment worker is listening for jobs.')
-
 async function shutDown() {
   console.log('Stopping deployment worker...')
+
+  for (const follower of runtimeLogFollowers.values()) {
+    follower.process.kill()
+    await follower.writer.close()
+  }
+
   await worker.close()
   await prisma.$disconnect()
   process.exit(0)

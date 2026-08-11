@@ -24,7 +24,10 @@ model User {
   installations        GithubInstallation[]
   deploymentActivities DeploymentActivity[]
 }
-
+enum DeploymentLogSource {
+  BUILD
+  RUNTIME
+}
 model Deployment {
   id                   String               @id @default(cuid())
   projectId            String
@@ -46,6 +49,7 @@ model Deployment {
   previewScreenshotUrl String?
   supersededAt         DateTime?
   stoppedAt            DateTime?
+  logs DeploymentLog[]
 
   @@index([projectId, createdAt])
   @@index([status])
@@ -99,7 +103,16 @@ model DeploymentActivity {
   @@index([deploymentId, createdAt])
   @@index([actorUserId])
 }
+model DeploymentLog {
+  id           String              @id @default(cuid())
+  deploymentId String
+  deployment   Deployment          @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+  source       DeploymentLogSource
+  message      String
+  createdAt    DateTime            @default(now())
 
+  @@index([deploymentId, createdAt])
+}
 model Project {
   id                       String              @id @default(cuid())
   name                     String

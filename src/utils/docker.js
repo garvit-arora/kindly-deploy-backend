@@ -108,11 +108,44 @@ function getDockerContainerLogs(containerName, tail = 500) {
     ],
   })
 }
+function followDockerContainerLogs({ containerName, onLog }) {
+  const dockerProcess = spawn(
+    'docker',
+    ['logs', '--follow', '--timestamps', containerName],
+    {
+      shell: process.platform === 'win32',
+    },
+  )
+
+  dockerProcess.stdout.on('data', (chunk) => {
+    onLog(chunk.toString())
+  })
+
+  dockerProcess.stderr.on('data', (chunk) => {
+    onLog(chunk.toString())
+  })
+
+  dockerProcess.on('error', (error) => {
+    console.error(
+      `Could not follow Docker logs for ${containerName}:`,
+      error.message,
+    )
+  })
+
+  return dockerProcess
+}
+function stopDockerContainer(containerName) {
+  return runDockerCommand({
+    args: ['stop', containerName],
+  })
+}
 module.exports = {
-    getDockerContainerLogs,
-    runDockerBuild,
-    runDockerContainer,
-    inspectDockerContainer,
-    removeDockerContainer,
-    getDockerHostPort
+  stopDockerContainer,
+  runDockerBuild,
+  runDockerContainer,
+  inspectDockerContainer,
+  getDockerHostPort,
+  removeDockerContainer,
+  getDockerContainerLogs,
+  followDockerContainerLogs,
 }

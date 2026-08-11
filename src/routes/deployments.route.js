@@ -85,6 +85,98 @@ router.get('/:deploymentId/logs', async (req, res) => {
     })
   }
 })
+router.get('/:deploymentId/build-logs', async (req, res) => {
+  try {
+    const deployment = await prisma.deployment.findFirst({
+      where: {
+        id: req.params.deploymentId,
+        project: {
+          userId: req.user.id,
+        },
+      },
+      select: {
+        id: true,
+        logs: {
+          where: {
+            source: 'BUILD',
+          },
+          orderBy: {
+            createdAt: 'asc',
+          },
+          take: 2000,
+          select: {
+            id: true,
+            message: true,
+            createdAt: true,
+          },
+        },
+      },
+    })
+
+    if (!deployment) {
+      return res.status(404).json({
+        message: 'Deployment was not found.',
+      })
+    }
+
+    return res.status(200).json({
+      deploymentId: deployment.id,
+      logs: deployment.logs,
+    })
+  } catch (error) {
+    console.error('Build log lookup failed:', error)
+
+    return res.status(500).json({
+      message: 'Could not load build logs.',
+    })
+  }
+})
+router.get('/:deploymentId/runtime-logs', async (req, res) => {
+  try {
+    const deployment = await prisma.deployment.findFirst({
+      where: {
+        id: req.params.deploymentId,
+        project: {
+          userId: req.user.id,
+        },
+      },
+      select: {
+        id: true,
+        logs: {
+          where: {
+            source: 'RUNTIME',
+          },
+          orderBy: {
+            createdAt: 'asc',
+          },
+          take: 2000,
+          select: {
+            id: true,
+            message: true,
+            createdAt: true,
+          },
+        },
+      },
+    })
+
+    if (!deployment) {
+      return res.status(404).json({
+        message: 'Deployment was not found.',
+      })
+    }
+
+    return res.status(200).json({
+      deploymentId: deployment.id,
+      logs: deployment.logs,
+    })
+  } catch (error) {
+    console.error('Runtime log lookup failed:', error)
+
+    return res.status(500).json({
+      message: 'Could not load runtime logs.',
+    })
+  }
+})
 router.get('/:deploymentId', async (req, res) => {
   try {
     const deployment = await prisma.deployment.findFirst({

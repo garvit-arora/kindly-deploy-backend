@@ -4,7 +4,7 @@ const requireAuth = require('../middlewares/requireAuth');
 const { getInstallationRepositories, getInstallationCommit, getInstallationDockerfile } = require('../utils/githubApp')
 const router = express.Router()
 const deploymentQueue = require('../queues/deploymentQueue')
-
+const { stopDockerContainer } = require('../utils/docker')
 router.use(requireAuth)
 
 router.post('/', async (req, res) => {
@@ -229,7 +229,8 @@ router.post('/:projectId/deployments', async (req, res) => {
       },
       include: {
         githubInstallation: true,
-      },
+      }
+      
     })
 
     if (!project) {
@@ -361,6 +362,8 @@ router.get('/:projectId/deployments', async (req, res) => {
             createdAt: 'desc',
           },
           select: {
+            supersededAt: true,
+            stoppedAt: true,
             id: true,
             branch: true,
             commitSha: true,
@@ -504,4 +507,80 @@ router.post(
     }
   },
 )
+router.post('/:projectId/deployments/:deploymentId/stop', async (req, res) => {
+  try {
+    const deployment = await prisma.deployment.findFirst({
+      where: {
+        id: req.params.deploymentId,
+        projectId: req.params.projectId,
+        project: {
+          userId: req.user.id,
+        },
+      },
+      select: {
+        id: true,
+        status: true,
+        containerName: true,
+        supersededAt: true,
+        stoppedAt: true,
+      },
+    })
+
+    if (!deployment) {
+      return res.status(404).json({
+        message: 'Deployment was not found.',
+      })
+    }
+
+    if (deployment.status !== 'READY' || !deployment.supersededAt) {
+      return res.status(400).json({
+        message: 'Only superseded ready deployments can be stopped.',
+      })
+    }
+
+    if (deployment.stoppedAt) {
+      return res.status(400).json({
+        message: 'This deployment container was already stopped.',
+      })
+    }
+
+    if (!deployment.containerName) {
+      return res.status(400).json({
+        message: 'This deployment has no container to stop.',
+      })
+    }
+
+    await stopDockerContainer(deployment.containerName)
+
+    const stoppedDeployment = await prisma.deployment.update({
+      where: {
+        id: deployment.id,
+      },
+      data: {
+        stoppedAt: new Date(),
+      },
+    })
+
+    await prisma.deploymentActivity.create({
+      data: {
+        deploymentId: deployment.id,
+        actorUserId: req.user.id,
+        type: 'STATUS_CHANGED',
+        fromStatus: 'READY',
+        toStatus: 'READY',
+        message: 'Superseded deployment container was stopped.',
+      },
+    })
+
+    return res.status(200).json({
+      deployment: stoppedDeployment,
+    })
+  } catch (error) {
+    console.error('Stopping deployment container failed:', error)
+
+    return res.status(500).json({
+      message: 'Could not stop the deployment container.',
+    })
+  }
+})
 module.exports = router
