@@ -1,225 +1,237 @@
-const express = require('express');
-const prisma = require('../lib/prisma');
-const requireAuth = require('../middlewares/requireAuth');
-const { getInstallationRepositories, getInstallationCommit, getInstallationDockerfile } = require('../utils/githubApp')
-const router = express.Router()
+
+const express = require('express')
+const prisma = require('../lib/prisma')
+const requireAuth = require('../middlewares/requireAuth')
+const {
+  getInstallationRepositories,
+  getInstallationCommit,
+  getInstallationDockerfile,
+} = require('../utils/githubApp')
 const deploymentQueue = require('../queues/deploymentQueue')
-const { stopDockerContainer } = require('../utils/docker')
+const {
+  stopSupersededDeploymentContainer,
+} = require('../services/deploymentCleanup.service')
+
+const router = express.Router()
+
 router.use(requireAuth)
 
 router.post('/', async (req, res) => {
-    const {
-        name,
-        githubInstallationId,
-        githubRepositoryId,
-        githubRepositoryFullName,
-        branch,
-    } = req.body
+  const {
+    name,
+    githubInstallationId,
+    githubRepositoryId,
+    githubRepositoryFullName,
+    branch,
+  } = req.body
 
-    const normalizedName = typeof name === 'string' ? name.trim() : ''
-    const normalizedBranch = typeof branch === 'string' ? branch.trim() : ''
+  const normalizedName = typeof name === 'string' ? name.trim() : ''
+  const normalizedBranch = typeof branch === 'string' ? branch.trim() : ''
 
-    if (!normalizedName) {
-        return res.status(400).json({
-            message: 'Project name is required.',
-        })
+  if (!normalizedName) {
+    return res.status(400).json({
+      message: 'Project name is required.',
+    })
+  }
+
+  if (
+    !githubInstallationId ||
+    !githubRepositoryId ||
+    !githubRepositoryFullName
+  ) {
+    return res.status(400).json({
+      message: 'Choose a GitHub repository.',
+    })
+  }
+
+  try {
+    const installation = await prisma.githubInstallation.findFirst({
+      where: {
+        id: githubInstallationId,
+        userId: req.user.id,
+      },
+    })
+
+    if (!installation) {
+      return res.status(404).json({
+        message: 'GitHub installation was not found.',
+      })
     }
 
-    if (
-        !githubInstallationId ||
-        !githubRepositoryId ||
-        !githubRepositoryFullName
-    ) {
-        return res.status(400).json({
-            message: 'Choose a GitHub repository.',
-        })
+    const repositories = await getInstallationRepositories(
+      installation.installationId,
+    )
+
+    const repository = repositories.find(
+      (item) =>
+        item.id === githubRepositoryId &&
+        item.fullName === githubRepositoryFullName,
+    )
+
+    if (!repository) {
+      return res.status(400).json({
+        message: 'Selected repository is not available to this installation.',
+      })
     }
+
+    const selectedBranch = normalizedBranch || repository.defaultBranch
+
+    const commit = await getInstallationCommit(
+      installation.installationId,
+      repository.fullName,
+      selectedBranch,
+    )
+
+    const dockerfile = await getInstallationDockerfile(
+      installation.installationId,
+      repository.fullName,
+      commit.sha,
+    )
+
+    if (!dockerfile.exists) {
+      return res.status(400).json({
+        message:
+          'This branch does not contain a root-level Dockerfile. KindlyDeploy currently supports Dockerfile repositories only.',
+      })
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      const project = await tx.project.create({
+        data: {
+          name: normalizedName,
+          userId: req.user.id,
+          branch: selectedBranch,
+          repositoryUrl: repository.url,
+          githubInstallationId: installation.id,
+          githubRepositoryId: repository.id,
+          githubRepositoryFullName: repository.fullName,
+        },
+      })
+
+      const deployment = await tx.deployment.create({
+        data: {
+          projectId: project.id,
+          branch: selectedBranch,
+          commitSha: commit.sha,
+          dockerfilePath: dockerfile.path || 'Dockerfile',
+          status: 'PENDING',
+        },
+      })
+
+      await tx.deploymentActivity.create({
+        data: {
+          deploymentId: deployment.id,
+          actorUserId: req.user.id,
+          type: 'DEPLOYMENT_CREATED',
+          toStatus: 'PENDING',
+          message: 'Deployment created and waiting for a worker.',
+          metadata: {
+            repositoryFullName: repository.fullName,
+            repositoryUrl: repository.url,
+            branch: selectedBranch,
+            commitSha: commit.sha,
+            dockerfilePath: dockerfile.path || 'Dockerfile',
+          },
+        },
+      })
+
+      return { project, deployment }
+    })
 
     try {
-        const installation = await prisma.githubInstallation.findFirst({
-            where: {
-                id: githubInstallationId,
-                userId: req.user.id,
-            },
+      await deploymentQueue.add(
+        'deploy',
+        {
+          deploymentId: result.deployment.id,
+        },
+        {
+          jobId: result.deployment.id,
+          removeOnComplete: true,
+          removeOnFail: 100,
+        },
+      )
+
+      const queuedDeployment = await prisma.$transaction(async (tx) => {
+        const deployment = await tx.deployment.update({
+          where: {
+            id: result.deployment.id,
+          },
+          data: {
+            status: 'QUEUED',
+          },
         })
 
-        if (!installation) {
-            return res.status(404).json({
-                message: 'GitHub installation was not found.',
-            })
-        }
-
-        const repositories = await getInstallationRepositories(
-            installation.installationId,
-        )
-
-        const repository = repositories.find(
-            (item) =>
-                item.id === githubRepositoryId &&
-                item.fullName === githubRepositoryFullName,
-        )
-
-        if (!repository) {
-            return res.status(400).json({
-                message: 'Selected repository is not available to this installation.',
-            })
-        }
-
-        const selectedBranch = normalizedBranch || repository.defaultBranch
-
-        const commit = await getInstallationCommit(
-            installation.installationId,
-            repository.fullName,
-            selectedBranch,
-        )
-
-        const dockerfile = await getInstallationDockerfile(
-            installation.installationId,
-            repository.fullName,
-            commit.sha,
-        )
-
-        if (!dockerfile.exists) {
-            return res.status(400).json({
-                message:
-                    'This branch does not contain a root-level Dockerfile. KindlyDeploy currently supports Dockerfile repositories only.',
-            })
-        }
-
-        const result = await prisma.$transaction(async (tx) => {
-            const project = await tx.project.create({
-                data: {
-                    name: normalizedName,
-                    userId: req.user.id,
-                    branch: selectedBranch,
-                    repositoryUrl: repository.url,
-                    githubInstallationId: installation.id,
-                    githubRepositoryId: repository.id,
-                    githubRepositoryFullName: repository.fullName,
-                },
-            })
-
-            const deployment = await tx.deployment.create({
-                data: {
-                    projectId: project.id,
-                    branch: selectedBranch,
-                    commitSha: commit.sha,
-                    dockerfilePath: dockerfile.path || 'Dockerfile',
-                    status: 'PENDING',
-                },
-            })
-
-            await tx.deploymentActivity.create({
-                data: {
-                    deploymentId: deployment.id,
-                    actorUserId: req.user.id,
-                    type: 'DEPLOYMENT_CREATED',
-                    toStatus: 'PENDING',
-                    message: 'Deployment created and waiting for a worker.',
-                    metadata: {
-                        repositoryFullName: repository.fullName,
-                        repositoryUrl: repository.url,
-                        branch: selectedBranch,
-                        commitSha: commit.sha,
-                        dockerfilePath: dockerfile.path || 'Dockerfile',
-                    },
-                },
-            })
-
-            return { project, deployment }
+        await tx.deploymentActivity.create({
+          data: {
+            deploymentId: deployment.id,
+            actorUserId: req.user.id,
+            type: 'STATUS_CHANGED',
+            fromStatus: 'PENDING',
+            toStatus: 'QUEUED',
+            message: 'Added to the deployment queue.',
+          },
         })
 
-        try {
-            await deploymentQueue.add(
-                'deploy',
-                {
-                    deploymentId: result.deployment.id,
-                },
-                {
-                    jobId: result.deployment.id,
-                    removeOnComplete: true,
-                    removeOnFail: 100,
-                },
-            )
+        return deployment
+      })
 
-            const queuedDeployment = await prisma.$transaction(async (tx) => {
-                const deployment = await tx.deployment.update({
-                    where: {
-                        id: result.deployment.id,
-                    },
-                    data: {
-                        status: 'QUEUED',
-                    },
-                })
-
-                await tx.deploymentActivity.create({
-                    data: {
-                        deploymentId: deployment.id,
-                        actorUserId: req.user.id,
-                        type: 'STATUS_CHANGED',
-                        fromStatus: 'PENDING',
-                        toStatus: 'QUEUED',
-                        message: 'Added to the deployment queue.',
-                    },
-                })
-
-                return deployment
-            })
-
-            return res.status(201).json({
-                project: result.project,
-                deployment: queuedDeployment,
-            })
-        } catch (error) {
-            console.error('Deployment queueing failed:', error)
-
-            return res.status(500).json({
-                message:
-                    'Project was created, but its deployment could not be added to the queue.',
-            })
-        }
+      return res.status(201).json({
+        project: result.project,
+        deployment: queuedDeployment,
+      })
     } catch (error) {
-        console.error('Project and deployment creation failed:', error)
+      console.error('Deployment queueing failed:', error)
 
-        return res.status(500).json({
-            message: 'Could not create the project and deployment.',
-        })
+      return res.status(500).json({
+        message:
+          'Project was created, but its deployment could not be added to the queue.',
+      })
     }
+  } catch (error) {
+    console.error('Project and deployment creation failed:', error)
+
+    return res.status(500).json({
+      message: 'Could not create the project and deployment.',
+    })
+  }
 })
+
 router.get('/', async (req, res) => {
-    try {
-        const projects = await prisma.project.findMany({
-            where: {
-                userId: req.user.id,
-            },
-            orderBy: {
-                createdAt: 'desc',
-            },
-            include: {
-                deployments: {
-                    orderBy: {
-                        createdAt: 'desc',
-                    },
-                    take: 1,
-                    select: {
-                        id: true,
-                        status: true,
-                        createdAt: true,
-                    },
-                },
-            },
-        })
-        return res.status(200).json({
-            projects
-        })
-    } catch (error) {
-        console.error("Project Listing Failed", error);
-        return res.status(500).json({
-            message: "Couldn't Load Projects",
-        })
+  try {
+    const projects = await prisma.project.findMany({
+      where: {
+        userId: req.user.id,
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+      include: {
+        deployments: {
+          orderBy: {
+            createdAt: 'desc',
+          },
+          take: 1,
+          select: {
+            id: true,
+            status: true,
+            createdAt: true,
+          },
+        },
+      },
+    })
 
-    }
+    return res.status(200).json({
+      projects,
+    })
+  } catch (error) {
+    console.error('Project Listing Failed', error)
+
+    return res.status(500).json({
+      message: "Couldn't Load Projects",
+    })
+  }
 })
+
 router.post('/:projectId/deployments', async (req, res) => {
   try {
     const project = await prisma.project.findFirst({
@@ -229,8 +241,7 @@ router.post('/:projectId/deployments', async (req, res) => {
       },
       include: {
         githubInstallation: true,
-      }
-      
+      },
     })
 
     if (!project) {
@@ -239,10 +250,7 @@ router.post('/:projectId/deployments', async (req, res) => {
       })
     }
 
-    if (
-      !project.githubInstallation ||
-      !project.githubRepositoryFullName
-    ) {
+    if (!project.githubInstallation || !project.githubRepositoryFullName) {
       return res.status(400).json({
         message: 'This project is not connected to a GitHub repository.',
       })
@@ -344,6 +352,7 @@ router.post('/:projectId/deployments', async (req, res) => {
     })
   }
 })
+
 router.get('/:projectId/deployments', async (req, res) => {
   try {
     const project = await prisma.project.findFirst({
@@ -394,6 +403,7 @@ router.get('/:projectId/deployments', async (req, res) => {
     })
   }
 })
+
 router.post(
   '/:projectId/deployments/:sourceDeploymentId/rollback',
   async (req, res) => {
@@ -507,73 +517,25 @@ router.post(
     }
   },
 )
+
 router.post('/:projectId/deployments/:deploymentId/stop', async (req, res) => {
   try {
-    const deployment = await prisma.deployment.findFirst({
-      where: {
-        id: req.params.deploymentId,
-        projectId: req.params.projectId,
-        project: {
-          userId: req.user.id,
-        },
-      },
-      select: {
-        id: true,
-        status: true,
-        containerName: true,
-        supersededAt: true,
-        stoppedAt: true,
-      },
+    const result = await stopSupersededDeploymentContainer({
+      deploymentId: req.params.deploymentId,
+      projectId: req.params.projectId,
+      userId: req.user.id,
+      actorUserId: req.user.id,
+      message: 'Superseded deployment container was stopped.',
     })
 
-    if (!deployment) {
-      return res.status(404).json({
-        message: 'Deployment was not found.',
+    if (!result.stopped) {
+      return res.status(result.statusCode).json({
+        message: result.message,
       })
     }
-
-    if (deployment.status !== 'READY' || !deployment.supersededAt) {
-      return res.status(400).json({
-        message: 'Only superseded ready deployments can be stopped.',
-      })
-    }
-
-    if (deployment.stoppedAt) {
-      return res.status(400).json({
-        message: 'This deployment container was already stopped.',
-      })
-    }
-
-    if (!deployment.containerName) {
-      return res.status(400).json({
-        message: 'This deployment has no container to stop.',
-      })
-    }
-
-    await stopDockerContainer(deployment.containerName)
-
-    const stoppedDeployment = await prisma.deployment.update({
-      where: {
-        id: deployment.id,
-      },
-      data: {
-        stoppedAt: new Date(),
-      },
-    })
-
-    await prisma.deploymentActivity.create({
-      data: {
-        deploymentId: deployment.id,
-        actorUserId: req.user.id,
-        type: 'STATUS_CHANGED',
-        fromStatus: 'READY',
-        toStatus: 'READY',
-        message: 'Superseded deployment container was stopped.',
-      },
-    })
 
     return res.status(200).json({
-      deployment: stoppedDeployment,
+      deployment: result.deployment,
     })
   } catch (error) {
     console.error('Stopping deployment container failed:', error)
@@ -583,4 +545,5 @@ router.post('/:projectId/deployments/:deploymentId/stop', async (req, res) => {
     })
   }
 })
+
 module.exports = router

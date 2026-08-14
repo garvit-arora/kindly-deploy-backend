@@ -4,6 +4,10 @@ const { Worker } = require('bullmq')
 const fs = require('fs/promises')
 const path = require('path')
 const prisma = require('../lib/prisma')
+const deploymentCleanupQueue = require('../queues/deploymentCleanupQueue')
+const {
+  stopSupersededDeploymentContainer,
+} = require('../services/deploymentCleanup.service')
 const { downloadRepository } = require('../utils/downloadRepository')
 const { waitForHttpHealth } = require('../utils/healthCheck')
 const takeScreenshot = require('../utils/takeScreenshot')
@@ -18,13 +22,48 @@ const {
 const {
   createDeploymentLogWriter,
 } = require('../utils/deploymentLogWriter')
+
 const connection = {
-  
   host: '127.0.0.1',
   port: 6379,
 }
+
+const SUPERSEDED_CONTAINER_STOP_DELAY_MS = 60 * 60 * 1000
+
 const runtimeLogFollowers = new Map()
-const worker = new Worker(
+
+async function scheduleSupersededContainerCleanup(deployments) {
+  await Promise.all(
+    deployments.map((deployment) =>
+      deploymentCleanupQueue.add(
+        'stop-superseded-container',
+        {
+          deploymentId: deployment.id,
+        },
+        {
+          jobId: `stop-superseded-container-${deployment.id}`,
+          delay: SUPERSEDED_CONTAINER_STOP_DELAY_MS,
+          removeOnComplete: true,
+          removeOnFail: 100,
+        },
+      ),
+    ),
+  )
+}
+
+async function closeRuntimeLogFollower(deploymentId) {
+  const follower = runtimeLogFollowers.get(deploymentId)
+
+  if (!follower) {
+    return
+  }
+
+  follower.process.kill()
+  await follower.writer.close()
+  runtimeLogFollowers.delete(deploymentId)
+}
+
+const deploymentWorker = new Worker(
   'deployments',
   async (job) => {
     const { deploymentId } = job.data
@@ -185,8 +224,8 @@ const worker = new Worker(
         },
       })
 
-      await prisma.$transaction(async (tx) => {
-        await tx.deployment.updateMany({
+      const supersededDeployments = await prisma.$transaction(async (tx) => {
+        const deploymentsToSupersede = await tx.deployment.findMany({
           where: {
             projectId: deployment.project.id,
             id: {
@@ -195,10 +234,26 @@ const worker = new Worker(
             status: 'READY',
             supersededAt: null,
           },
-          data: {
-            supersededAt: new Date(),
+          select: {
+            id: true,
           },
         })
+
+        if (deploymentsToSupersede.length > 0) {
+          await tx.deployment.updateMany({
+            where: {
+              id: {
+                in: deploymentsToSupersede.map(
+                  (supersededDeployment) => supersededDeployment.id,
+                ),
+              },
+            },
+            data: {
+              supersededAt: new Date(),
+            },
+          })
+        }
+
         await tx.deployment.update({
           where: { id: deploymentId },
           data: {
@@ -228,23 +283,29 @@ const worker = new Worker(
             },
           },
         })
+
+        return deploymentsToSupersede
       })
+
+      await scheduleSupersededContainerCleanup(supersededDeployments)
+
       const runtimeLogWriter = createDeploymentLogWriter({
-  deploymentId,
-  source: 'RUNTIME',
-})
+        deploymentId,
+        source: 'RUNTIME',
+      })
 
-const runtimeLogProcess = followDockerContainerLogs({
-  containerName,
-  onLog: (line) => {
-    runtimeLogWriter.write(line)
-  },
-})
+      const runtimeLogProcess = followDockerContainerLogs({
+        containerName,
+        onLog: (line) => {
+          runtimeLogWriter.write(line)
+        },
+      })
 
-runtimeLogFollowers.set(deploymentId, {
-  process: runtimeLogProcess,
-  writer: runtimeLogWriter,
-})
+      runtimeLogFollowers.set(deploymentId, {
+        process: runtimeLogProcess,
+        writer: runtimeLogWriter,
+      })
+
       try {
         const screenshotPath = await takeScreenshot(localUrl, deploymentId)
 
@@ -292,6 +353,7 @@ runtimeLogFollowers.set(deploymentId, {
           },
         })
       }
+
       console.log(`Deployment ${deploymentId} is ready at ${localUrl}`)
     } catch (error) {
       await prisma.$transaction(async (tx) => {
@@ -319,24 +381,64 @@ runtimeLogFollowers.set(deploymentId, {
   },
   { connection },
 )
-worker.on('completed', (job) => {
+
+const cleanupWorker = new Worker(
+  'deployment-cleanups',
+  async (job) => {
+    const { deploymentId } = job.data
+
+    console.log(`Starting cleanup for deployment ${deploymentId}`)
+
+    const result = await stopSupersededDeploymentContainer({
+      deploymentId,
+      message: 'Superseded deployment container was stopped automatically.',
+    })
+
+    if (!result.stopped) {
+      console.log(`Cleanup skipped for deployment ${deploymentId}: ${result.message}`)
+      return
+    }
+
+    await closeRuntimeLogFollower(result.deployment.id)
+
+    console.log(
+      `Stopped superseded deployment container ${result.deployment.containerName}`,
+    )
+  },
+  { connection },
+)
+
+deploymentWorker.on('completed', (job) => {
   console.log(`Job ${job.id} completed`)
 })
 
-worker.on('failed', (job, error) => {
+deploymentWorker.on('failed', (job, error) => {
   console.error(`Job ${job?.id} failed:`, error)
 })
 
+cleanupWorker.on('completed', (job) => {
+  console.log(`Cleanup job ${job.id} completed`)
+})
+
+cleanupWorker.on('failed', (job, error) => {
+  console.error(`Cleanup job ${job?.id} failed:`, error)
+})
+
 console.log('Deployment worker is listening for jobs.')
+console.log('Deployment cleanup worker is listening for jobs.')
+
 async function shutDown() {
   console.log('Stopping deployment worker...')
 
-  for (const follower of runtimeLogFollowers.values()) {
+  for (const [deploymentId, follower] of runtimeLogFollowers.entries()) {
     follower.process.kill()
     await follower.writer.close()
+    runtimeLogFollowers.delete(deploymentId)
   }
 
-  await worker.close()
+  await deploymentWorker.close()
+  await cleanupWorker.close()
+  await deploymentCleanupQueue.close()
   await prisma.$disconnect()
   process.exit(0)
 }
