@@ -177,6 +177,78 @@ router.get('/:deploymentId/runtime-logs', async (req, res) => {
     })
   }
 })
+router.get('/:deploymentId/logs/stream', async (req, res) => {
+    const deployment = await prisma.deployment.findFirst({
+      where: {
+        id: req.params.deploymentId,
+        project: {
+          userId: req.user.id,
+        },
+      },
+      select: {
+        id: true,
+      },
+    })
+
+    if (!deployment) {
+      return res.status(404).json({
+        message: 'Deployment was not found.',
+      })
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    })
+
+    let lastCreatedAt = new Date(0)
+    let isClosed = false
+
+    req.on('close', () => {
+      isClosed = true
+    })
+
+    while (!isClosed) {
+      const logs = await prisma.deploymentLog.findMany({
+        where: {
+          deploymentId: req.params.deploymentId,
+          createdAt: {
+            gt: lastCreatedAt,
+          },
+        },
+        orderBy: {
+          createdAt: 'asc',
+        },
+      })
+
+      for (const log of logs) {
+        res.write(`data: ${JSON.stringify(log)}\n\n`)
+        lastCreatedAt = log.createdAt
+      }
+
+      const currentDeployment = await prisma.deployment.findUnique({
+        where: {
+          id: req.params.deploymentId,
+        },
+        select: {
+          status: true,
+        },
+      })
+
+      if (
+        logs.length === 0 &&
+        ['READY', 'FAILED', 'CANCELLED'].includes(currentDeployment.status)
+      ) {
+        break
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+    }
+
+    res.end()
+  })
+
 router.get('/:deploymentId', async (req, res) => {
   try {
     const deployment = await prisma.deployment.findFirst({

@@ -34,7 +34,8 @@ model Deployment {
   project              Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
   branch               String
   commitSha            String
-  dockerfilePath       String               @default("Dockerfile")
+  dockerfilePath       String?
+  buildStrategy        BuildStrategy        @default(DOCKERFILE)
   status               DeploymentStatus     @default(PENDING)
   imageTag             String?
   containerName        String?
@@ -113,6 +114,12 @@ model DeploymentLog {
 
   @@index([deploymentId, createdAt])
 }
+
+ enum BuildStrategy {
+    DOCKERFILE
+    NODE_FRONTEND
+    NODE_BACKEND
+  }
 model Project {
   id                       String              @id @default(cuid())
   name                     String
@@ -126,12 +133,24 @@ model Project {
   githubInstallation       GithubInstallation? @relation(fields: [githubInstallationId], references: [id], onDelete: SetNull)
   githubRepositoryId       String?
   githubRepositoryFullName String?
+  buildStrategy            BuildStrategy       @default(DOCKERFILE)
   deployments              Deployment[]
-
+  environmentVariables     EnvironmentVariable[]
   @@index([githubInstallationId, githubRepositoryId])
   @@index([userId])
 }
+model EnvironmentVariable {
+    id             String   @id @default(cuid())
+    projectId      String
+    project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+    key            String
+    encryptedValue String
+    createdAt      DateTime @default(now())
+    updatedAt      DateTime @updatedAt
 
+    @@unique([projectId, key])
+    @@index([projectId])
+  }
 model Session {
   id        String   @id @default(cuid())
   tokenHash String   @unique

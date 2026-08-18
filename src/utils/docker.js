@@ -1,38 +1,41 @@
 const { spawn } = require('child_process')
 
-function runDockerCommand({ args, cwd, onLog }) {
-    return new Promise((resolve, reject) => {
-        const dockerProcess = spawn('docker', args, {
-            cwd,
-            shell: process.platform === 'win32',
-        })
+function runDockerContainer({
+      imageTag,
+      containerName,
+      containerPort,
+      subdomain,
+      envVars,
+      onLog,
+  }) {
+      const envArgs = (envVars || []).flatMap((envVar) => [
+          '--env',
+          `${envVar.key}=${envVar.value}`,
+      ])
 
-        let output = ''
+      return runDockerCommand({
+          args: [
+              'run',
+              '--detach',
+              '--name',
+              containerName,
+              '--network',
+              'kindlydeploy-network',
+              ...envArgs,
+              '--label',
+              'traefik.enable=true',
+              '--label',
+              `traefik.http.routers.${containerName}.rule=Host(\`${subdomain}\`)`,
+              '--label',
+              `traefik.http.routers.${containerName}.entrypoints=web`,
+              '--label',
 
-        dockerProcess.stdout.on('data', (chunk) => {
-            const text = chunk.toString()
-            output += text
-            onLog?.(text)
-        })
-
-        dockerProcess.stderr.on('data', (chunk) => {
-            const text = chunk.toString()
-            output += text
-            onLog?.(text)
-        })
-
-        dockerProcess.on('error', reject)
-
-        dockerProcess.on('close', (code) => {
-            if (code === 0) {
-                resolve(output.trim())
-                return
-            }
-
-            reject(new Error(`Docker command failed with exit code ${code}.`))
-        })
-    })
-}
+  `traefik.http.services.${containerName}.loadbalancer.server.port=${containerPort}`,
+              imageTag,
+          ],
+          onLog,
+      })
+  }
 
 function runDockerBuild({ repositoryPath, imageTag, onLog }) {
     return runDockerCommand({
@@ -42,27 +45,34 @@ function runDockerBuild({ repositoryPath, imageTag, onLog }) {
     })
 }
 
-function runDockerContainer({
-    imageTag,
-    containerName,
-    containerPort,
-    onLog,
-}) {
-    return runDockerCommand({
-        args: [
-            'run',
-            '--detach',
-            '--name',
-            containerName,
-            '--network',
-            'kindlydeploy-network',
-            '--publish',
-            `0:${containerPort}`,
-            imageTag,
-        ],
-        onLog,
-    })
-}
+  function runDockerContainer({
+      imageTag,
+      containerName,
+      containerPort,
+      subdomain,
+      onLog,
+  }) {
+      return runDockerCommand({
+          args: [
+              'run',
+              '--detach',
+              '--name',
+              containerName,
+              '--network',
+              'kindlydeploy-network',
+              '--label',
+              'traefik.enable=true',
+              '--label',
+              `traefik.http.routers.${containerName}.rule=Host(\`${subdomain}\`)`,
+              '--label',
+              `traefik.http.routers.${containerName}.entrypoints=web`,
+              '--label',
+              `traefik.http.services.${containerName}.loadbalancer.server.port=${containerPort}`,
+              imageTag,
+          ],
+          onLog,
+      })
+  }
 
 function inspectDockerContainer(containerName) {
     return runDockerCommand({

@@ -219,8 +219,54 @@ async function getInstallationDockerfile(
     sha: file.sha,
   }
 }
+async function getInstallationPackageJson(
+    installationId,
+    repositoryFullName,
+    commitSha,
+  ) {
+    const [owner, repository] = repositoryFullName.split('/')
+
+    if (!owner || !repository || !commitSha) {
+      throw new Error('GitHub repository name or commit SHA is invalid.')
+    }
+
+    const token = await createInstallationAccessToken(installationId)
+
+    const response = await fetch(
+      `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/contents/package.json?ref=${encodeURIComponent(commitSha)}`,
+      {
+        headers: {
+          Accept: 'application/vnd.github+json',
+          Authorization: `Bearer ${token}`,
+          'User-Agent': 'KindlyDeploy',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+      },
+    )
+
+    if (response.status === 404) {
+      return {
+        exists: false,
+      }
+    }
+
+    if (!response.ok) {
+      throw new Error('Could not check the repository package.json.')
+    }
+
+    const file = await response.json()
+    const packageJson = JSON.parse(
+      Buffer.from(file.content, 'base64').toString('utf8'),
+    )
+
+    return {
+      exists: true,
+      packageJson,
+    }
+  }
 module.exports = {
   getGitHubInstallation,
+  getInstallationPackageJson,
   getInstallationRepositories,
   getInstallationBranches,
   getInstallationCommit,

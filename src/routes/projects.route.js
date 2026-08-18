@@ -1,11 +1,12 @@
-
 const express = require('express')
 const prisma = require('../lib/prisma')
+const { encrypt } = require('../utils/encryption')
 const requireAuth = require('../middlewares/requireAuth')
 const {
   getInstallationRepositories,
   getInstallationCommit,
   getInstallationDockerfile,
+  getInstallationPackageJson,
 } = require('../utils/githubApp')
 const deploymentQueue = require('../queues/deploymentQueue')
 const {
@@ -17,16 +18,20 @@ const router = express.Router()
 router.use(requireAuth)
 
 router.post('/', async (req, res) => {
-  const {
-    name,
-    githubInstallationId,
-    githubRepositoryId,
-    githubRepositoryFullName,
-    branch,
-  } = req.body
+    const {
+      name,
+      githubInstallationId,
+      githubRepositoryId,
+      githubRepositoryFullName,
+      branch,
+      buildStrategy,
+      environmentVariables,
+    } = req.body
 
   const normalizedName = typeof name === 'string' ? name.trim() : ''
   const normalizedBranch = typeof branch === 'string' ? branch.trim() : ''
+  const requestedBuildStrategy =
+    typeof buildStrategy === 'string' ? buildStrategy : 'DOCKERFILE'
 
   if (!normalizedName) {
     return res.status(400).json({
@@ -42,6 +47,39 @@ router.post('/', async (req, res) => {
     return res.status(400).json({
       message: 'Choose a GitHub repository.',
     })
+  }
+
+  if (
+    !['DOCKERFILE', 'NODE_FRONTEND', 'NODE_BACKEND'].includes(
+      requestedBuildStrategy,
+    )
+  ) {
+    return res.status(400).json({
+      message: 'Unsupported build strategy.',
+    })
+  }
+
+  const normalizedEnvironmentVariables = Array.isArray(environmentVariables)
+    ? environmentVariables
+    : []
+
+  for (const variable of normalizedEnvironmentVariables) {
+    const variableKey =
+      typeof variable?.key === 'string' ? variable.key.trim() : ''
+    const variableValue =
+      typeof variable?.value === 'string' ? variable.value : ''
+
+    if (!variableKey || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(variableKey)) {
+      return res.status(400).json({
+        message: `Invalid environment variable key: "${variableKey || variable?.key}".`,
+      })
+    }
+
+    if (!variableValue) {
+      return res.status(400).json({
+        message: `Environment variable "${variableKey}" needs a value.`,
+      })
+    }
   }
 
   try {
@@ -82,17 +120,36 @@ router.post('/', async (req, res) => {
       selectedBranch,
     )
 
-    const dockerfile = await getInstallationDockerfile(
-      installation.installationId,
-      repository.fullName,
-      commit.sha,
-    )
+    let dockerfilePath = null
 
-    if (!dockerfile.exists) {
-      return res.status(400).json({
-        message:
-          'This branch does not contain a root-level Dockerfile. KindlyDeploy currently supports Dockerfile repositories only.',
-      })
+    if (requestedBuildStrategy === 'DOCKERFILE') {
+      const dockerfile = await getInstallationDockerfile(
+        installation.installationId,
+        repository.fullName,
+        commit.sha,
+      )
+
+      if (!dockerfile.exists) {
+        return res.status(400).json({
+          message:
+            'This branch does not contain a root-level Dockerfile. Choose a different build strategy or add a Dockerfile.',
+        })
+      }
+
+      dockerfilePath = dockerfile.path || 'Dockerfile'
+    } else {
+      const packageJsonResult = await getInstallationPackageJson(
+        installation.installationId,
+        repository.fullName,
+        commit.sha,
+      )
+
+      if (!packageJsonResult.exists) {
+        return res.status(400).json({
+          message:
+            'This branch does not contain a package.json KindlyDeploy can build.',
+        })
+      }
     }
 
     const result = await prisma.$transaction(async (tx) => {
@@ -105,6 +162,7 @@ router.post('/', async (req, res) => {
           githubInstallationId: installation.id,
           githubRepositoryId: repository.id,
           githubRepositoryFullName: repository.fullName,
+          buildStrategy: requestedBuildStrategy,
         },
       })
 
@@ -113,10 +171,30 @@ router.post('/', async (req, res) => {
           projectId: project.id,
           branch: selectedBranch,
           commitSha: commit.sha,
-          dockerfilePath: dockerfile.path || 'Dockerfile',
+          dockerfilePath,
+          buildStrategy: requestedBuildStrategy,
           status: 'PENDING',
         },
       })
+
+      for (const variable of normalizedEnvironmentVariables) {
+        await tx.environmentVariable.upsert({
+          where: {
+            projectId_key: {
+              projectId: project.id,
+              key: variable.key.trim(),
+            },
+          },
+          update: {
+            encryptedValue: encrypt(variable.value),
+          },
+          create: {
+            projectId: project.id,
+            key: variable.key.trim(),
+            encryptedValue: encrypt(variable.value),
+          },
+        })
+      }
 
       await tx.deploymentActivity.create({
         data: {
@@ -130,7 +208,8 @@ router.post('/', async (req, res) => {
             repositoryUrl: repository.url,
             branch: selectedBranch,
             commitSha: commit.sha,
-            dockerfilePath: dockerfile.path || 'Dockerfile',
+            dockerfilePath,
+            buildStrategy: requestedBuildStrategy,
           },
         },
       })
@@ -148,6 +227,11 @@ router.post('/', async (req, res) => {
           jobId: result.deployment.id,
           removeOnComplete: true,
           removeOnFail: 100,
+          attempts: 3,
+          backoff: {
+            type: 'exponential',
+            delay: 5000,
+          },
         },
       )
 
@@ -262,17 +346,36 @@ router.post('/:projectId/deployments', async (req, res) => {
       project.branch,
     )
 
-    const dockerfile = await getInstallationDockerfile(
-      project.githubInstallation.installationId,
-      project.githubRepositoryFullName,
-      commit.sha,
-    )
+    let dockerfilePath = null
 
-    if (!dockerfile.exists) {
-      return res.status(400).json({
-        message:
-          'The selected branch no longer contains a root-level Dockerfile.',
-      })
+    if (project.buildStrategy === 'DOCKERFILE') {
+      const dockerfile = await getInstallationDockerfile(
+        project.githubInstallation.installationId,
+        project.githubRepositoryFullName,
+        commit.sha,
+      )
+
+      if (!dockerfile.exists) {
+        return res.status(400).json({
+          message:
+            'The selected branch no longer contains a root-level Dockerfile.',
+        })
+      }
+
+      dockerfilePath = dockerfile.path || 'Dockerfile'
+    } else {
+      const packageJsonResult = await getInstallationPackageJson(
+        project.githubInstallation.installationId,
+        project.githubRepositoryFullName,
+        commit.sha,
+      )
+
+      if (!packageJsonResult.exists) {
+        return res.status(400).json({
+          message:
+            'The selected branch no longer contains a package.json KindlyDeploy can build.',
+        })
+      }
     }
 
     const deployment = await prisma.$transaction(async (tx) => {
@@ -281,7 +384,8 @@ router.post('/:projectId/deployments', async (req, res) => {
           projectId: project.id,
           branch: project.branch,
           commitSha: commit.sha,
-          dockerfilePath: dockerfile.path || 'Dockerfile',
+          dockerfilePath,
+          buildStrategy: project.buildStrategy,
           status: 'PENDING',
         },
       })
@@ -297,7 +401,8 @@ router.post('/:projectId/deployments', async (req, res) => {
             repositoryFullName: project.githubRepositoryFullName,
             branch: project.branch,
             commitSha: commit.sha,
-            dockerfilePath: dockerfile.path || 'Dockerfile',
+            dockerfilePath,
+            buildStrategy: project.buildStrategy,
           },
         },
       })
@@ -314,6 +419,11 @@ router.post('/:projectId/deployments', async (req, res) => {
         jobId: deployment.id,
         removeOnComplete: true,
         removeOnFail: 100,
+        attempts: 3,
+        backoff: {
+          type: 'exponential',
+          delay: 5000,
+        },
       },
     )
 
@@ -443,6 +553,7 @@ router.post(
             branch: sourceDeployment.branch,
             commitSha: sourceDeployment.commitSha,
             dockerfilePath: sourceDeployment.dockerfilePath,
+            buildStrategy: sourceDeployment.buildStrategy,
             status: 'PENDING',
           },
         })
@@ -475,6 +586,11 @@ router.post(
           jobId: rollbackDeployment.id,
           removeOnComplete: true,
           removeOnFail: 100,
+          attempts: 3,
+          backoff: {
+            type: 'exponential',
+            delay: 5000,
+          },
         },
       )
 
@@ -545,5 +661,121 @@ router.post('/:projectId/deployments/:deploymentId/stop', async (req, res) => {
     })
   }
 })
+router.get('/:projectId/environment-variables', async (req, res) => {
+  try {
+    const project = await prisma.project.findFirst({
+      where: { id: req.params.projectId, userId: req.user.id },
+    })
 
+    if (!project) {
+      return res.status(404).json({ message: 'Project was not found.' })
+    }
+
+    const variables = await prisma.environmentVariable.findMany({
+      where: { projectId: project.id },
+      orderBy: { key: 'asc' },
+      select: { id: true, key: true, createdAt: true, updatedAt: true },
+    })
+
+    return res.status(200).json({ variables })
+  } catch (error) {
+    console.error('Environment variable listing failed:', error)
+
+    return res.status(500).json({
+      message: 'Could not load environment variables.',
+    })
+  }
+})
+
+router.post('/:projectId/environment-variables', async (req, res) => {
+  const { key, value } = req.body
+  const normalizedKey = typeof key === 'string' ? key.trim() : ''
+
+  if (!normalizedKey || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(normalizedKey)) {
+    return res.status(400).json({
+      message:
+        'Key must start with a letter or underscore and contain only letters,numbers, and underscores.',
+    })
+  }
+
+  if (typeof value !== 'string' || !value) {
+    return res.status(400).json({
+      message: 'Value is required.',
+    })
+  }
+
+  try {
+    const project = await prisma.project.findFirst({
+      where: { id: req.params.projectId, userId: req.user.id },
+    })
+
+    if (!project) {
+      return res.status(404).json({ message: 'Project was not found.' })
+    }
+
+    const encryptedValue = encrypt(value)
+
+    const variable = await prisma.environmentVariable.upsert({
+      where: {
+        projectId_key: {
+          projectId: project.id,
+          key: normalizedKey,
+        },
+      },
+      update: {
+        encryptedValue,
+      },
+      create: {
+        projectId: project.id,
+        key: normalizedKey,
+        encryptedValue,
+      },
+      select: { id: true, key: true, createdAt: true, updatedAt: true },
+    })
+
+    return res.status(201).json({ variable })
+  } catch (error) {
+    console.error('Environment variable save failed:', error)
+
+    return res.status(500).json({
+      message: 'Could not save the environment variable.',
+    })
+  }
+})
+
+router.delete(
+  '/:projectId/environment-variables/:variableId',
+  async (req, res) => {
+    try {
+      const project = await prisma.project.findFirst({
+        where: { id: req.params.projectId, userId: req.user.id },
+      })
+
+      if (!project) {
+        return res.status(404).json({ message: 'Project was not found.' })
+      }
+
+      const deleted = await prisma.environmentVariable.deleteMany({
+        where: {
+          id: req.params.variableId,
+          projectId: project.id,
+        },
+      })
+
+      if (deleted.count === 0) {
+        return res.status(404).json({
+          message: 'Environment variable was not found.',
+        })
+      }
+
+      return res.status(204).send()
+    } catch (error) {
+      console.error('Environment variable deletion failed:', error)
+
+      return res.status(500).json({
+        message: 'Could not delete the environment variable.',
+      })
+    }
+  },
+)
 module.exports = router
