@@ -1,0 +1,19 @@
+services:
+    traefik:
+      image: traefik:v3.0
+      container_name: kindlydeploy-traefik
+      restart: unless-stopped
+      command:
+        - --providers.docker=true
+        - --providers.docker.exposedbydefault=false
+        - --entrypoints.web.address=:80
+      ports:
+        - "80:80"
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock:ro
+      networks:
+        - kindlydeploy-network
+
+networks:
+    kindlydeploy-network:
+      external: true
