@@ -30,7 +30,7 @@ const express = require('express');
 
   const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:5173')
       .split(',')
-      .map((origin) => origin.trim())
+      .map((origin) => origin.trim().replace(/\/+$/, ''))
       .filter(Boolean)
 
   const primaryFrontendUrl = allowedOrigins[0]
