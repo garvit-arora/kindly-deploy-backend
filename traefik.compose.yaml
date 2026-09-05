@@ -1,6 +1,6 @@
 services:
     traefik:
-      image: traefik:v3.0
+      image: traefik:v3.5
       container_name: kindlydeploy-traefik
       restart: unless-stopped
       command:
