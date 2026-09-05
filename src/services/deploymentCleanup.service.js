@@ -1,13 +1,7 @@
 const prisma = require('../lib/prisma')
 const { stopDockerContainer } = require('../utils/docker')
 
-async function stopSupersededDeploymentContainer({
-  deploymentId,
-  projectId,
-  userId,
-  actorUserId,
-  message,
-}) {
+async function findStoppableDeployment({ deploymentId, projectId, userId }) {
   const where = {
     id: deploymentId,
   }
@@ -35,7 +29,7 @@ async function stopSupersededDeploymentContainer({
 
   if (!deployment) {
     return {
-      stopped: false,
+      stoppable: false,
       statusCode: 404,
       message: 'Deployment was not found.',
     }
@@ -43,7 +37,7 @@ async function stopSupersededDeploymentContainer({
 
   if (deployment.status !== 'READY' || !deployment.supersededAt) {
     return {
-      stopped: false,
+      stoppable: false,
       statusCode: 400,
       message: 'Only superseded ready deployments can be stopped.',
     }
@@ -51,7 +45,7 @@ async function stopSupersededDeploymentContainer({
 
   if (deployment.stoppedAt) {
     return {
-      stopped: false,
+      stoppable: false,
       statusCode: 400,
       message: 'This deployment container was already stopped.',
     }
@@ -59,11 +53,40 @@ async function stopSupersededDeploymentContainer({
 
   if (!deployment.containerName) {
     return {
-      stopped: false,
+      stoppable: false,
       statusCode: 400,
       message: 'This deployment has no container to stop.',
     }
   }
+
+  return {
+    stoppable: true,
+    deployment,
+  }
+}
+
+async function stopSupersededDeploymentContainer({
+  deploymentId,
+  projectId,
+  userId,
+  actorUserId,
+  message,
+}) {
+  const check = await findStoppableDeployment({
+    deploymentId,
+    projectId,
+    userId,
+  })
+
+  if (!check.stoppable) {
+    return {
+      stopped: false,
+      statusCode: check.statusCode,
+      message: check.message,
+    }
+  }
+
+  const deployment = check.deployment
 
   await stopDockerContainer(deployment.containerName)
 
@@ -98,5 +121,6 @@ async function stopSupersededDeploymentContainer({
 }
 
 module.exports = {
+  findStoppableDeployment,
   stopSupersededDeploymentContainer,
 }

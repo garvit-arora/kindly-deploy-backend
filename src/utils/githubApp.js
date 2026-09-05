@@ -3,11 +3,17 @@ const fs = require('fs');
 const path=require('path');
 
 function getPrivateKey(){
-    const privateKeyPath= process.env.GITHUB_PRIVATE_KEY_PATH;
-    if(!privateKeyPath){
-        throw new Error("GITHUB_PRIVATE_KEY_PATH is missing.")
+    const encodedPrivateKey = process.env.GITHUB_PRIVATE_KEY_BASE64;
+    if(encodedPrivateKey){
+        return Buffer.from(encodedPrivateKey,'base64').toString('utf8')
     }
-    return fs.readFileSync(path.resolve(process.cwd(),privateKeyPath),'utf8')
+    const privateKeyPath= process.env.GITHUB_PRIVATE_KEY_PATH;
+    if(privateKeyPath){
+        return fs.readFileSync(path.resolve(process.cwd(),privateKeyPath),'utf8')
+    }
+    throw new Error(
+        "GITHUB_PRIVATE_KEY_BASE64 or GITHUB_PRIVATE_KEY_PATH is missing.",
+    )
 }
 function createAppJwt(){
     if(!process.env.GITHUB_APP_ID){

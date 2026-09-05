@@ -5,8 +5,10 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js",
     "dev": "nodemon server.js",
-    "worker": "node src/workers/deploymentWorker.js"
+    "worker": "node src/workers/deploymentWorker.js",
+    "postinstall": "prisma generate"
   },
   "keywords": [],
   "author": "",

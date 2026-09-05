@@ -4,9 +4,11 @@ async function waitForHttpHealth(url, options = {}) {
 
   let lastError
 
+  const headers = options.hostHeader ? { Host: options.hostHeader } : undefined
+
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      const response = await fetch(url)
+      const response = await fetch(url, { headers })
 
       if (response.ok) {
         return

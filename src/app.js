@@ -25,9 +25,32 @@ const express = require('express');
   const cookieParser = require('cookie-parser');
   const projectRoutes=require("./routes/projects.route")
   const app = express();
+
+  const isProduction = process.env.NODE_ENV === 'production'
+
+  const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:5173')
+      .split(',')
+      .map((origin) => origin.trim())
+      .filter(Boolean)
+
+  const primaryFrontendUrl = allowedOrigins[0]
+
+  const sessionCookieOptions = {
+      httpOnly: true,
+      sameSite: isProduction ? 'none' : 'lax',
+      secure: isProduction,
+  }
+
+  app.set('trust proxy', 1)
   app.use(
       cors({
-          origin:process.env.FRONTEND_URL || "http://localhost:5173",
+          origin: (origin, callback) => {
+              if (!origin || allowedOrigins.includes(origin)) {
+                  return callback(null, true)
+              }
+
+              return callback(new Error('Origin is not allowed by CORS.'))
+          },
           credentials:true,
       })
   )
@@ -133,9 +156,7 @@ const express = require('express');
               }
           })
           res.cookie('kindlydeploy_session', sessionToken, {
-              httpOnly: true,
-              sameSite: 'lax',
-              secure: process.env.NODE_ENV == "production",
+              ...sessionCookieOptions,
               maxAge: SESSION_DURATION_MS,
           })
           return res.status(201).json({
@@ -174,11 +195,7 @@ const express = require('express');
                       tokenHash: hashSessionToken(sessionToken)
           }})
           }
-          res.clearCookie("kindlydeploy_session",{
-              httpOnly:true,
-              sameSite:'lax',
-              secure:process.env.NODE_ENV==="production",
-          })
+          res.clearCookie("kindlydeploy_session",sessionCookieOptions)
           return res.sendStatus(204)
       } catch (error) {
           console.log('Logout Failed',error);
@@ -209,9 +226,7 @@ const express = require('express');
       }
       const state = crypto.randomBytes(32).toString('hex');
       res.cookie('github_oauth_state',state,{
-          httpOnly:true,
-          sameSite:'lax',
-          secure:process.env.NODE_ENV==='production',
+          ...sessionCookieOptions,
           maxAge:10*60*1000,
       })
       const authorizationUrl = new URL('https://github.com/login/oauth/authorize')
@@ -225,17 +240,14 @@ const express = require('express');
       const {code,state,error} = req.query;
       const savedState = req.cookies.github_oauth_state
 
-      res.clearCookie('github_oauth_state',{
-          httpOnly:true,
-          sameSite:'lax',
-          secure:process.env.NODE_ENV==="production",
-      })
+      res.clearCookie('github_oauth_state',sessionCookieOptions)
       if(error||!code||!isValidOAuthState(savedState,state)){
           return res.status(400).json({
               message:"Github verfication could not be verified."
           })
       }
-      const {GITHUB_CLIENT_ID,GITHUB_CLIENT_SECRET,GITHUB_CALLBACK_URL,FRONTEND_URL} = process.env
+      const {GITHUB_CLIENT_ID,GITHUB_CLIENT_SECRET,GITHUB_CALLBACK_URL} = process.env
+      const FRONTEND_URL = primaryFrontendUrl
       if(!GITHUB_CALLBACK_URL||!GITHUB_CLIENT_ID||!GITHUB_CLIENT_SECRET||!FRONTEND_URL){
           return res.status(500).json({
               message:"Github authentication isn't configured."
@@ -295,9 +307,7 @@ const express = require('express');
               }
           })
           res.cookie('kindlydeploy_session',sessionToken,{
-              httpOnly:true,
-              sameSite:'lax',
-              secure:process.env.NODE_ENV==="production",
+              ...sessionCookieOptions,
               maxAge:SESSION_DURATION_MS
           })
           return res.redirect(`${FRONTEND_URL}/dashboard/projects`)
@@ -350,7 +360,7 @@ const express = require('express');
         },
       })
 
-      return res.redirect(`${process.env.FRONTEND_URL}/dashboard/projects/new`)
+      return res.redirect(`${primaryFrontendUrl}/dashboard/projects/new`)
     } catch (error) {
       console.error('GitHub installation callback failed:', error)
 

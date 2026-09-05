@@ -28,12 +28,17 @@ require('dotenv').config()
     generateDockerfile,
   } = require('../utils/detectBuildStrategy')
 
-  const connection = {
-    host: '127.0.0.1',
-    port: 6379,
-  }
+ const { getRedisConnectionOptions } = require('../lib/redisConnection')
+
+  const connection = getRedisConnectionOptions()
 
   const SUPERSEDED_CONTAINER_STOP_DELAY_MS = 60 * 60 * 1000
+
+  const DEPLOYMENT_BASE_HOST =
+    process.env.DEPLOYMENT_BASE_HOST || '127.0.0.1.nip.io'
+
+  const DEPLOYMENT_HEALTH_CHECK_HOST =
+    process.env.DEPLOYMENT_HEALTH_CHECK_HOST || '127.0.0.1'
 
   const runtimeLogFollowers = new Map()
 
@@ -267,8 +272,9 @@ require('dotenv').config()
 
         const containerName = `kindlydeploy-${deployment.id}`
         const containerPort = 80
-        const subdomain = `${deployment.id}.127.0.0.1.nip.io`
+        const subdomain = `${deployment.id}.${DEPLOYMENT_BASE_HOST}`
         const localUrl = `http://${subdomain}`
+        const healthCheckUrl = `http://${DEPLOYMENT_HEALTH_CHECK_HOST}`
 
         createdContainerName = containerName
 
@@ -318,7 +324,7 @@ require('dotenv').config()
           },
         })
 
-        await waitForHttpHealth(localUrl)
+        await waitForHttpHealth(healthCheckUrl, { hostHeader: subdomain })
 
         await prisma.deploymentActivity.create({
           data: {
@@ -534,13 +540,16 @@ require('dotenv').config()
   const cleanupWorker = new Worker(
     'deployment-cleanups',
     async (job) => {
-      const { deploymentId } = job.data
+      const { deploymentId, actorUserId, message } = job.data
 
       console.log(`Starting cleanup for deployment ${deploymentId}`)
 
       const result = await stopSupersededDeploymentContainer({
         deploymentId,
-        message: 'Superseded deployment container was stopped automatically.',
+        actorUserId,
+        message:
+          message ||
+          'Superseded deployment container was stopped automatically.',
       })
 
       if (!result.stopped) {

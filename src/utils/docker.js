@@ -29,8 +29,7 @@ function runDockerContainer({
               '--label',
               `traefik.http.routers.${containerName}.entrypoints=web`,
               '--label',
-
-  `traefik.http.services.${containerName}.loadbalancer.server.port=${containerPort}`,
+              `traefik.http.services.${containerName}.loadbalancer.server.port=${containerPort}`,
               imageTag,
           ],
           onLog,
@@ -44,35 +43,6 @@ function runDockerBuild({ repositoryPath, imageTag, onLog }) {
         onLog,
     })
 }
-
-  function runDockerContainer({
-      imageTag,
-      containerName,
-      containerPort,
-      subdomain,
-      onLog,
-  }) {
-      return runDockerCommand({
-          args: [
-              'run',
-              '--detach',
-              '--name',
-              containerName,
-              '--network',
-              'kindlydeploy-network',
-              '--label',
-              'traefik.enable=true',
-              '--label',
-              `traefik.http.routers.${containerName}.rule=Host(\`${subdomain}\`)`,
-              '--label',
-              `traefik.http.routers.${containerName}.entrypoints=web`,
-              '--label',
-              `traefik.http.services.${containerName}.loadbalancer.server.port=${containerPort}`,
-              imageTag,
-          ],
-          onLog,
-      })
-  }
 
 function inspectDockerContainer(containerName) {
     return runDockerCommand({

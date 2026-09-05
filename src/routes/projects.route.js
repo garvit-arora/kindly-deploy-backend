@@ -9,8 +9,9 @@ const {
   getInstallationPackageJson,
 } = require('../utils/githubApp')
 const deploymentQueue = require('../queues/deploymentQueue')
+const deploymentCleanupQueue = require('../queues/deploymentCleanupQueue')
 const {
-  stopSupersededDeploymentContainer,
+  findStoppableDeployment,
 } = require('../services/deploymentCleanup.service')
 
 const router = express.Router()
@@ -636,25 +637,48 @@ router.post(
 
 router.post('/:projectId/deployments/:deploymentId/stop', async (req, res) => {
   try {
-    const result = await stopSupersededDeploymentContainer({
+    const check = await findStoppableDeployment({
       deploymentId: req.params.deploymentId,
       projectId: req.params.projectId,
       userId: req.user.id,
-      actorUserId: req.user.id,
-      message: 'Superseded deployment container was stopped.',
     })
 
-    if (!result.stopped) {
-      return res.status(result.statusCode).json({
-        message: result.message,
+    if (!check.stoppable) {
+      return res.status(check.statusCode).json({
+        message: check.message,
       })
     }
 
-    return res.status(200).json({
-      deployment: result.deployment,
+    await deploymentCleanupQueue.add(
+      'stop-superseded-container',
+      {
+        deploymentId: check.deployment.id,
+        actorUserId: req.user.id,
+        message: 'Superseded deployment container was stopped.',
+      },
+      {
+        jobId: `stop-superseded-container-manual-${check.deployment.id}`,
+        removeOnComplete: true,
+        removeOnFail: 100,
+      },
+    )
+
+    await prisma.deploymentActivity.create({
+      data: {
+        deploymentId: check.deployment.id,
+        actorUserId: req.user.id,
+        type: 'STATUS_CHANGED',
+        fromStatus: 'READY',
+        toStatus: 'READY',
+        message: 'Stopping the deployment container was requested.',
+      },
+    })
+
+    return res.status(202).json({
+      deployment: check.deployment,
     })
   } catch (error) {
-    console.error('Stopping deployment container failed:', error)
+    console.error('Requesting deployment container stop failed:', error)
 
     return res.status(500).json({
       message: 'Could not stop the deployment container.',

@@ -35,7 +35,6 @@ router.get('/', async (req, res) => {
     })
   }
 })
-const { getDockerContainerLogs } = require('../utils/docker')
 router.get('/:deploymentId/logs', async (req, res) => {
   const tail = Number.parseInt(req.query.tail, 10)
   const safeTail =
@@ -68,20 +67,33 @@ router.get('/:deploymentId/logs', async (req, res) => {
       })
     }
 
-    const logs = await getDockerContainerLogs(
-      deployment.containerName,
-      safeTail,
-    )
+    const logs = await prisma.deploymentLog.findMany({
+      where: {
+        deploymentId: deployment.id,
+        source: 'RUNTIME',
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+      take: safeTail,
+      select: {
+        message: true,
+        createdAt: true,
+      },
+    })
 
     return res.status(200).json({
       deploymentId: deployment.id,
-      logs,
+      logs: logs
+        .reverse()
+        .map((log) => `${log.createdAt.toISOString()} ${log.message}`)
+        .join('\n'),
     })
   } catch (error) {
-    console.error('Docker log lookup failed:', error)
+    console.error('Runtime container log lookup failed:', error)
 
     return res.status(500).json({
-      message: 'Could not load Docker container logs.',
+      message: 'Could not load container logs.',
     })
   }
 })

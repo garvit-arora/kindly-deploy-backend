@@ -1,12 +1,10 @@
 const { Queue } = require('bullmq')
+  const { getRedisConnectionOptions } = require('../lib/redisConnection')
 
-const connection = {
-  host: '127.0.0.1',
-  port: 6379,
-}
+  const connection = getRedisConnectionOptions()
 
-const deploymentQueue = new Queue('deployments', {
-  connection,
-})
+  const deploymentQueue = new Queue('deployments', {
+    connection,
+  })
 
-module.exports = deploymentQueue
+  module.exports = deploymentQueue
