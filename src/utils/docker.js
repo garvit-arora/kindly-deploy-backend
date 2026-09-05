@@ -1,5 +1,39 @@
 const { spawn } = require('child_process')
 
+function runDockerCommand({ args, cwd, onLog }) {
+    return new Promise((resolve, reject) => {
+        const dockerProcess = spawn('docker', args, {
+            cwd,
+            shell: process.platform === 'win32',
+        })
+
+        let output = ''
+
+        dockerProcess.stdout.on('data', (chunk) => {
+            const text = chunk.toString()
+            output += text
+            onLog?.(text)
+        })
+
+        dockerProcess.stderr.on('data', (chunk) => {
+            const text = chunk.toString()
+            output += text
+            onLog?.(text)
+        })
+
+        dockerProcess.on('error', reject)
+
+        dockerProcess.on('close', (code) => {
+            if (code === 0) {
+                resolve(output.trim())
+                return
+            }
+
+            reject(new Error(`Docker command failed with exit code ${code}.`))
+        })
+    })
+}
+
 function runDockerContainer({
       imageTag,
       containerName,
