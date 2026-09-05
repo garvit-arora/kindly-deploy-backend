@@ -24,6 +24,8 @@ const express = require('express');
   const requireAuth = require('./middlewares/requireAuth');
   const cookieParser = require('cookie-parser');
   const projectRoutes=require("./routes/projects.route")
+  const accountRoutes = require('./routes/account.route')
+  const domainRoutes = require('./routes/domains.route')
   const app = express();
 
   const isProduction = process.env.NODE_ENV === 'production'
@@ -63,6 +65,8 @@ const express = require('express');
   app.use('/api/overview', overviewRoutes)
   app.use('/api/projects',projectRoutes)
   app.use('/api/deployments', deploymentRoutes)
+  app.use('/api/account', accountRoutes)
+  app.use('/api/domains', domainRoutes)
   app.get('/api/health', async (req, res) => {
       try {
           await prisma.$queryRaw`SELECT 1`
