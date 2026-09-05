@@ -379,12 +379,29 @@ const express = require('express');
       })
 
       const repositoryGroups = await Promise.all(
-        installations.map(async (installation) => ({
-          installationId: installation.id,
-          repositories: await getInstallationRepositories(
-            installation.installationId,
-          ),
-        })),
+        installations.map(async (installation) => {
+          try {
+            return {
+              installationId: installation.id,
+              repositories: await getInstallationRepositories(
+                installation.installationId,
+              ),
+            }
+          } catch (error) {
+            if (error.status === 404) {
+              await prisma.githubInstallation.delete({
+                where: { id: installation.id },
+              })
+            } else {
+              console.error(
+                `Skipping GitHub installation ${installation.installationId}:`,
+                error,
+              )
+            }
+
+            return { installationId: installation.id, repositories: [] }
+          }
+        }),
       )
 
       const repositories = repositoryGroups.flatMap((group) =>

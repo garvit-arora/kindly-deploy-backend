@@ -54,7 +54,9 @@ async function createInstallationAccessToken(installationId) {
   )
 
   if (!response.ok) {
-    throw new Error('Could not create GitHub installation access token.')
+    const error = new Error('Could not create GitHub installation access token.')
+    error.status = response.status
+    throw error
   }
 
   const data = await response.json()
@@ -78,7 +80,9 @@ async function getInstallationRepositories(installationId) {
   )
 
   if (!response.ok) {
-    throw new Error('Could not load GitHub repositories.')
+    const error = new Error('Could not load GitHub repositories.')
+    error.status = response.status
+    throw error
   }
 
   const data = await response.json()
