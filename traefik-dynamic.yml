@@ -1,0 +1,25 @@
+# Traefik's Docker provider can only route to containers. The worker
+# supervisor runs on the host under pm2 — it has to start and stop pm2
+# processes, so it cannot live inside a container — which means Traefik needs
+# to be told about it explicitly. That is what this file provider is for.
+#
+# Routing it through Traefik keeps port 80 as the only port open on the VM.
+# Without this the supervisor would need its own hole in the network security
+# group.
+#
+# `host.docker.internal` resolves to the host gateway, wired up by the
+# `extra_hosts` entry in traefik.compose.yaml.
+
+http:
+  routers:
+    worker-supervisor:
+      rule: "Host(`worker.172.198.57.66.nip.io`)"
+      entryPoints:
+        - web
+      service: worker-supervisor
+
+  services:
+    worker-supervisor:
+      loadBalancer:
+        servers:
+          - url: "http://host.docker.internal:4000"

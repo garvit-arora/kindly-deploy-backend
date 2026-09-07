@@ -9,6 +9,7 @@ const {
   getInstallationPackageJson,
 } = require('../utils/githubApp')
 const deploymentQueue = require('../queues/deploymentQueue')
+const { wakeWorker } = require('../utils/wakeWorker')
 const deploymentCleanupQueue = require('../queues/deploymentCleanupQueue')
 const {
   findStoppableDeployment,
@@ -236,6 +237,8 @@ router.post('/', async (req, res) => {
         },
       )
 
+      await wakeWorker(`project-create:${result.deployment.id}`)
+
       const queuedDeployment = await prisma.$transaction(async (tx) => {
         const deployment = await tx.deployment.update({
           where: {
@@ -411,22 +414,62 @@ router.post('/:projectId/deployments', async (req, res) => {
       return createdDeployment
     })
 
-    await deploymentQueue.add(
-      'deploy',
-      {
-        deploymentId: deployment.id,
-      },
-      {
-        jobId: deployment.id,
-        removeOnComplete: true,
-        removeOnFail: 100,
-        attempts: 3,
-        backoff: {
-          type: 'exponential',
-          delay: 5000,
+    // The deployment row is already committed at this point. If the queue
+    // rejects the job and we let the error escape, the row is stranded at
+    // PENDING forever: no worker will ever see it and nothing retries it.
+    // Mark it FAILED so the state in the UI matches reality.
+    try {
+      await deploymentQueue.add(
+        'deploy',
+        {
+          deploymentId: deployment.id,
         },
-      },
-    )
+        {
+          jobId: deployment.id,
+          removeOnComplete: true,
+          removeOnFail: 100,
+          attempts: 3,
+          backoff: {
+            type: 'exponential',
+            delay: 5000,
+          },
+        },
+      )
+    } catch (queueError) {
+      console.error(
+        `Could not queue redeployment ${deployment.id}:`,
+        queueError.message,
+      )
+
+      await prisma.$transaction(async (tx) => {
+        await tx.deployment.update({
+          where: {
+            id: deployment.id,
+          },
+          data: {
+            status: 'FAILED',
+            finishedAt: new Date(),
+          },
+        })
+
+        await tx.deploymentActivity.create({
+          data: {
+            deploymentId: deployment.id,
+            actorUserId: req.user.id,
+            type: 'BUILD_FAILED',
+            fromStatus: 'PENDING',
+            toStatus: 'FAILED',
+            message: `Could not add this deployment to the queue: ${queueError.message}`,
+          },
+        })
+      })
+
+      return res.status(503).json({
+        message: 'Deployment could not be queued. Please try again.',
+      })
+    }
+
+    await wakeWorker(`redeploy:${deployment.id}`)
 
     const queuedDeployment = await prisma.$transaction(async (tx) => {
       const updatedDeployment = await tx.deployment.update({
@@ -594,6 +637,8 @@ router.post(
           },
         },
       )
+
+      await wakeWorker(`rollback:${rollbackDeployment.id}`)
 
       const queuedDeployment = await prisma.$transaction(async (tx) => {
         const updatedDeployment = await tx.deployment.update({

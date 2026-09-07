@@ -6,11 +6,17 @@ services:
       command:
         - --providers.docker=true
         - --providers.docker.exposedbydefault=false
+        - --providers.file.filename=/etc/traefik/dynamic.yml
         - --entrypoints.web.address=:80
       ports:
         - "80:80"
+      extra_hosts:
+        # Lets the file provider reach the worker supervisor, which runs on the
+        # host rather than in a container.
+        - "host.docker.internal:host-gateway"
       volumes:
         - /var/run/docker.sock:/var/run/docker.sock:ro
+        - ./traefik-dynamic.yml:/etc/traefik/dynamic.yml:ro
       networks:
         - kindlydeploy-network
 

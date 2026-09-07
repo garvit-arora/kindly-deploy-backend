@@ -1,5 +1,9 @@
 const prisma = require('../lib/prisma')
-const { stopDockerContainer } = require('../utils/docker')
+const {
+  stopDockerContainer,
+  removeDockerContainer,
+  removeDockerImage,
+} = require('../utils/docker')
 
 async function findStoppableDeployment({ deploymentId, projectId, userId }) {
   const where = {
@@ -22,6 +26,7 @@ async function findStoppableDeployment({ deploymentId, projectId, userId }) {
       id: true,
       status: true,
       containerName: true,
+      imageTag: true,
       supersededAt: true,
       stoppedAt: true,
     },
@@ -90,6 +95,35 @@ async function stopSupersededDeploymentContainer({
 
   await stopDockerContainer(deployment.containerName)
 
+  // The grace window has closed, so nothing can be rolled back to this
+  // container any more. Reclaim its disk: a stopped container still holds its
+  // writable layer, and its image is never reused because every deployment is
+  // tagged with its own id. Both are best effort — failing to free space must
+  // not turn a successful stop into a failed job.
+  const reclaimed = { container: false, image: false }
+
+  try {
+    await removeDockerContainer(deployment.containerName)
+    reclaimed.container = true
+  } catch (removeContainerError) {
+    console.error(
+      `Could not remove container ${deployment.containerName}:`,
+      removeContainerError.message,
+    )
+  }
+
+  if (deployment.imageTag) {
+    try {
+      await removeDockerImage(deployment.imageTag)
+      reclaimed.image = true
+    } catch (removeImageError) {
+      console.error(
+        `Could not remove image ${deployment.imageTag}:`,
+        removeImageError.message,
+      )
+    }
+  }
+
   const stoppedDeployment = await prisma.$transaction(async (tx) => {
     const updatedDeployment = await tx.deployment.update({
       where: {
@@ -108,6 +142,12 @@ async function stopSupersededDeploymentContainer({
         fromStatus: 'READY',
         toStatus: 'READY',
         message,
+        metadata: {
+          containerName: deployment.containerName,
+          imageTag: deployment.imageTag,
+          containerRemoved: reclaimed.container,
+          imageRemoved: reclaimed.image,
+        },
       },
     })
 

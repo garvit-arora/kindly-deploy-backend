@@ -15,6 +15,7 @@ const express = require('express');
   const { detectBuildStrategy } = require('./utils/detectBuildStrategy')
   const redis = require('./lib/redis')
   const deploymentQueue = require('./queues/deploymentQueue')
+  const { wakeWorker } = require('./utils/wakeWorker')
   const {
       SESSION_DURATION_MS,
       getSessionExpiresAt,
@@ -655,6 +656,8 @@ const express = require('express');
                       },
                   },
               )
+
+              await wakeWorker(`github-push:${deployment.id}`)
 
               await prisma.$transaction(async (tx) => {
                   await tx.deployment.update({

@@ -437,8 +437,10 @@ require('dotenv').config()
           writer: runtimeLogWriter,
         })
 
+        let screenshotPath = ''
+
         try {
-          const screenshotPath = await takeScreenshot(localUrl, deploymentId)
+          screenshotPath = await takeScreenshot(localUrl, deploymentId)
 
           const previewScreenshotUrl = await uploadDeploymentScreenshot({
             filePath: screenshotPath,
@@ -483,6 +485,12 @@ require('dotenv').config()
               message: 'Deployment is ready, but preview screenshot capture failed.',
             },
           })
+        } finally {
+          // The PNG only exists to be uploaded. Once ImageKit has it, or once
+          // the attempt has failed, the local copy is dead weight.
+          if (screenshotPath) {
+            await fs.rm(screenshotPath, { force: true }).catch(() => {})
+          }
         }
 
         console.log(`Deployment ${deploymentId} is ready at ${localUrl}`)
@@ -532,6 +540,11 @@ require('dotenv').config()
         })
 
         throw error
+      } finally {
+        // The extracted source is only needed until `docker build` has read it.
+        // Whether the deployment succeeded or failed, keeping it serves no
+        // purpose and every deployment would otherwise leave a copy behind.
+        await cleanupRepositoryPath(repositoryPath, deploymentId)
       }
     },
     { connection },
@@ -566,6 +579,82 @@ require('dotenv').config()
     { connection },
   )
 
+  // Idle exit.
+  //
+  // BullMQ has to poll: Redis cannot push a job to a consumer, so an idle
+  // worker keeps asking "anything yet?" — one billed command every few
+  // seconds, forever. Rather than pay for the question, the worker stops
+  // asking. It exits once it has been idle long enough, and the API starts it
+  // again on the next push or redeploy.
+  //
+  // Set WORKER_IDLE_EXIT_MS to 0 (or leave it unset) to keep the worker
+  // running forever, which is what you want in local development and on a
+  // self-hosted Redis where idle polling is free.
+  const WORKER_IDLE_EXIT_MS = Number(process.env.WORKER_IDLE_EXIT_MS) || 0
+
+  let activeJobCount = 0
+  let idleExitTimer = null
+
+  function cancelIdleExit() {
+    if (idleExitTimer) {
+      clearTimeout(idleExitTimer)
+      idleExitTimer = null
+    }
+  }
+
+  function scheduleIdleExit() {
+    if (!WORKER_IDLE_EXIT_MS) {
+      return
+    }
+
+    cancelIdleExit()
+
+    // Never exit mid-build. A deployment can easily outlive the idle window,
+    // and the job would be re-run from the start on the next wake.
+    if (activeJobCount > 0) {
+      return
+    }
+
+    idleExitTimer = setTimeout(() => {
+      if (activeJobCount > 0) {
+        return
+      }
+
+      console.log(
+        `No work for ${WORKER_IDLE_EXIT_MS} ms. Exiting to stop polling Redis.`,
+      )
+
+      shutDown()
+    }, WORKER_IDLE_EXIT_MS)
+
+    // Do not hold the event loop open just for this timer.
+    idleExitTimer.unref?.()
+  }
+
+  function trackWorkerActivity(worker) {
+    worker.on('active', () => {
+      activeJobCount += 1
+      cancelIdleExit()
+    })
+
+    const onSettled = () => {
+      activeJobCount = Math.max(0, activeJobCount - 1)
+      scheduleIdleExit()
+    }
+
+    worker.on('completed', onSettled)
+    worker.on('failed', onSettled)
+
+    // `drained` fires when the queue has no waiting jobs left. Delayed jobs
+    // are not "waiting", so this still fires while a cleanup job is pending
+    // its one-hour timer — the supervisor's sweep is what brings the worker
+    // back when that timer is due.
+    worker.on('drained', scheduleIdleExit)
+  }
+
+  trackWorkerActivity(deploymentWorker)
+  trackWorkerActivity(cleanupWorker)
+
   deploymentWorker.on('completed', (job) => {
     console.log(`Job ${job.id} completed`)
   })
@@ -584,6 +673,15 @@ require('dotenv').config()
 
   console.log('Deployment worker is listening for jobs.')
   console.log('Deployment cleanup worker is listening for jobs.')
+
+  if (WORKER_IDLE_EXIT_MS) {
+    console.log(`Worker will exit after ${WORKER_IDLE_EXIT_MS} ms of no work.`)
+
+    // Cover the case where the worker was woken but the job is already gone
+    // (a duplicate wake, or another worker got there first). Without this the
+    // worker would sit polling forever having never received a `drained`.
+    scheduleIdleExit()
+  }
 
   async function shutDown() {
     console.log('Stopping deployment worker...')

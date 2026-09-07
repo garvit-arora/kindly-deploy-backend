@@ -153,8 +153,14 @@ function stopDockerContainer(containerName) {
     args: ['stop', containerName],
   })
 }
+function removeDockerImage(imageTag) {
+  return runDockerCommand({
+    args: ['rmi', '--force', imageTag],
+  })
+}
 module.exports = {
   stopDockerContainer,
+  removeDockerImage,
   runDockerBuild,
   runDockerContainer,
   inspectDockerContainer,

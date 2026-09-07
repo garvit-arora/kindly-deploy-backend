@@ -1,9 +1,11 @@
 node_modules/
 .env
 .env.local
+.env.bak*
 
 /src/generated/prisma
 keys/
 *.pem
 temp/
 tmp/
+src/screenshots/
